@@ -757,5 +757,6 @@ class _ScanScreenState extends State<ScanScreen> {
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
     );
+ 
   }
 }
