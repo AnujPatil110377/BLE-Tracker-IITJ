@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:geolocator/geolocator.dart';
 
@@ -13,8 +14,8 @@ class BleDevice {
 }
 
 class BleScanner {
-  static const int DEVICE_CACHE_SIZE = 1000;
-  static const Duration SCAN_TIMEOUT = Duration(seconds: 30);
+  static const int deviceCacheSize = 1000;
+  static const Duration scanTimeout = Duration(seconds: 30);
 
   final _deviceStreamController = StreamController<List<BleDevice>>.broadcast();
   final Map<String, BleDevice> _deviceCache = {};
@@ -28,7 +29,7 @@ class BleScanner {
   BleScanner() {
     // Monitor Bluetooth adapter state
     _adapterStateSubscription = FlutterBluePlus.adapterState.listen((state) {
-      print('Bluetooth state changed: $state');
+      debugPrint('Bluetooth state changed: $state');
       if (state == BluetoothAdapterState.on) {
         _startScanIfNotRunning();
       } else {
@@ -41,12 +42,12 @@ class BleScanner {
     if (_isScanning) return;
     
     try {
-      print('Attempting to start BLE scan...');
+      debugPrint('Attempting to start BLE scan...');
       
       // Request location permission since it's required for BLE scanning
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
-        print('Location services are disabled');
+        debugPrint('Location services are disabled');
         throw Exception('Location services are disabled');
       }
 
@@ -54,26 +55,26 @@ class BleScanner {
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
         if (permission == LocationPermission.denied) {
-          print('Location permission denied');
+          debugPrint('Location permission denied');
           throw Exception('Location permission denied');
         }
       }
 
       if (permission == LocationPermission.deniedForever) {
-        print('Location permissions permanently denied');
+        debugPrint('Location permissions permanently denied');
         throw Exception('Location permissions permanently denied');
       }
 
       // Check Bluetooth state
       if (await FlutterBluePlus.isSupported == false) {
-        print('Bluetooth not supported on this device');
+        debugPrint('Bluetooth not supported on this device');
         throw Exception('Bluetooth not supported');
       }
 
       await FlutterBluePlus.turnOn();
       _startScanIfNotRunning();
     } catch (e) {
-      print('Error starting scan: $e');
+      debugPrint('Error starting scan: $e');
       _deviceStreamController.addError(e);
     }
   }
@@ -83,26 +84,26 @@ class BleScanner {
     _isScanning = true;
 
     try {
-      print('Starting BLE scan...');
+      debugPrint('Starting BLE scan...');
       
       // Listen for scan results
       _scanSubscription = FlutterBluePlus.scanResults.listen(
         (results) {
-          print('Raw scan results received: ${results.length} devices');
+          debugPrint('Raw scan results received: ${results.length} devices');
           for (var result in results) {
-            print('Device: ${result.device.remoteId}, RSSI: ${result.rssi}, '
+            debugPrint('Device: ${result.device.remoteId}, RSSI: ${result.rssi}, '
                 'Name: ${result.device.localName}');
             if (result.advertisementData.manufacturerData.isNotEmpty) {
-              print('Manufacturer Data: ${result.advertisementData.manufacturerData}');
+              debugPrint('Manufacturer Data: ${result.advertisementData.manufacturerData}');
             }
             if (result.advertisementData.serviceUuids.isNotEmpty) {
-              print('Service UUIDs: ${result.advertisementData.serviceUuids}');
+              debugPrint('Service UUIDs: ${result.advertisementData.serviceUuids}');
             }
           }
           _handleScanResults(results);
         },
         onError: (e) {
-          print('Scan subscription error: $e');
+          debugPrint('Scan subscription error: $e');
           _deviceStreamController.addError(e);
           _restartScan();
         },
@@ -110,21 +111,21 @@ class BleScanner {
 
       // Start the actual scan
       await FlutterBluePlus.startScan(
-        timeout: SCAN_TIMEOUT,
+        timeout: scanTimeout,
         oneByOne: false, // Process results immediately
         androidScanMode: AndroidScanMode.lowLatency,
       );
 
-      print('Scan started successfully');
+      debugPrint('Scan started successfully');
 
       // Set scan timeout
-      _scanTimer = Timer(SCAN_TIMEOUT, () {
-        print('Scan timeout reached');
+      _scanTimer = Timer(scanTimeout, () {
+        debugPrint('Scan timeout reached');
         _stopScan();
         _startScanIfNotRunning(); // Restart scan after timeout
       });
     } catch (e) {
-      print('Error in _startScanIfNotRunning: $e');
+      debugPrint('Error in _startScanIfNotRunning: $e');
       _deviceStreamController.addError(e);
       _restartScan();
     }
@@ -135,12 +136,12 @@ class BleScanner {
     try {
       currentLocation = await Geolocator.getCurrentPosition();
     } catch (e) {
-      print('Error getting location: $e');
+      debugPrint('Error getting location: $e');
     }
 
     for (ScanResult r in results) {
       // Cache management - remove oldest devices if cache is full
-      if (_deviceCache.length >= DEVICE_CACHE_SIZE) {
+      if (_deviceCache.length >= deviceCacheSize) {
         var oldestDevice = _deviceCache.entries
             .reduce((a, b) => a.value.lastSeen.isBefore(b.value.lastSeen) ? a : b);
         _deviceCache.remove(oldestDevice.key);
