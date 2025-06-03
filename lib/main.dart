@@ -6,6 +6,8 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart'; // Added
+import 'package:geolocator/geolocator.dart'; // Added for location fetching
+import 'package:ble_beacon_tracker/screens/map_screen.dart'; // Added for map view
 
 // MOVED TO TOP LEVEL and made accessible for background service
 Map<String, dynamic>? parseFMDNData(ScanResult scanResult) {
@@ -79,6 +81,35 @@ void onStart(ServiceInstance service) async {
   }
 
 
+  // Helper function to get current location
+  Future<Position?> getCurrentLocation() async {
+    try {
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        debugPrint("BackgroundService: Location services are disabled.");
+        return null;
+      }
+
+      // Permissions should have been granted by the main app.
+      // For background, `locationAlways` is key on Android.
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) {
+        debugPrint("BackgroundService: Location permission denied. Cannot fetch location.");
+        // Optionally, notify the user or log this more visibly if critical
+        return null;
+      }
+      
+      return await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.medium, // Adjust as needed
+        timeLimit: const Duration(seconds: 10), // Timeout for location fetch
+      );
+    } catch (e) {
+      debugPrint("BackgroundService: Error getting location: $e");
+      return null;
+    }
+  }
+
+
   Future<void> performBackgroundScan() async {
     if (isCurrentlyScanningBg) {
       debugPrint("BackgroundService: Scan already in progress.");
@@ -132,15 +163,44 @@ void onStart(ServiceInstance service) async {
 
     try {
       final List<String> foundDevicesInCycle = [];
-      scanResultsSubscriptionBg = FlutterBluePlus.scanResults.listen((results) {
-        for (ScanResult r in results) {
-          final fmdnData = parseFMDNData(r);
+      scanResultsSubscriptionBg = FlutterBluePlus.scanResults.listen((results) async { // Made callback async
+        for (ScanResult r in results) {          final fmdnData = parseFMDNData(r);
           if (fmdnData != null) {
             if (!foundDevicesInCycle.contains(r.device.remoteId.toString())) {
-              debugPrint(
-                  "BackgroundService: Found FMDN Device: ${r.device.remoteId}, Data: $fmdnData");
               foundDevicesInCycle.add(r.device.remoteId.toString());
-              // service.invoke('foundDevice', {'device': r.device.remoteId.toString(), 'fmdn': fmdnData});
+              
+              String deviceName = r.device.platformName.isNotEmpty 
+                  ? r.device.platformName 
+                  : (r.advertisementData.advName.isNotEmpty ? r.advertisementData.advName : "Unknown Device");
+              
+              // Fetch location when a new FMDN device is found
+              Position? currentLocation = await getCurrentLocation();
+              
+              // Log device discovery
+              debugPrint(
+                  "BackgroundService: Found FMDN Device: ID=${r.device.remoteId}, Name='$deviceName', RSSI=${r.rssi}, Data: $fmdnData");
+              
+              // If location available, log it and send to UI
+              if (currentLocation != null) {
+                debugPrint("BackgroundService: Location: Lat ${currentLocation.latitude.toStringAsFixed(5)}, " +
+                    "Lon ${currentLocation.longitude.toStringAsFixed(5)} (Acc: ${currentLocation.accuracy.toStringAsFixed(1)}m)");
+                
+                // Send data to UI for map display
+                service.invoke('foundDevice', {
+                  'device': r.device.remoteId.toString(),
+                  'name': deviceName,
+                  'fmdn': fmdnData,
+                  'rssi': r.rssi,
+                  'location': {
+                    'latitude': currentLocation.latitude,
+                    'longitude': currentLocation.longitude,
+                    'accuracy': currentLocation.accuracy,
+                    'timestamp': DateTime.now().millisecondsSinceEpoch,
+                  }
+                });
+              } else {
+                debugPrint("BackgroundService: Location: Not available");
+              }
             }
           }
         }
@@ -209,7 +269,6 @@ void onStart(ServiceInstance service) async {
       debugPrint("BackgroundService: Skipping scan as one is already in progress.");
     }
   });
-
   service.on('stopService').listen((event) async {
     debugPrint("BackgroundService: Received stopService event.");
     scanTimer?.cancel();
@@ -219,6 +278,16 @@ void onStart(ServiceInstance service) async {
     }
     await service.stopSelf();
     debugPrint("BackgroundService: Service stopped.");
+  });
+  
+  // Listen for ping test (for API testing)
+  service.on('ping').listen((event) {
+    debugPrint("BackgroundService: Received ping test. Responding...");
+    service.invoke('pingResponse', {
+      'success': true,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'original': event,
+    });
   });
 }
 
@@ -296,7 +365,7 @@ Future<void> main() async {
   // Request permissions
   if (Platform.isAndroid) {
     await Permission.location.request(); // General location
-    await Permission.locationAlways.request(); // Background location
+    await Permission.locationAlways.request(); // Crucial for background location
     await Permission.bluetoothScan.request();
     await Permission.bluetoothConnect.request();
     await Permission.notification.request(); // For Android 13+ notifications
@@ -338,13 +407,7 @@ class _ScanScreenState extends State<ScanScreen> {
   BluetoothAdapterState _adapterState = BluetoothAdapterState.unknown;
   late StreamSubscription<BluetoothAdapterState> _adapterStateStateSubscription;
 
-  final List<Map<String, dynamic>> _processedScanResults = []; // For foreground scan
-  bool _isScanning = false; // For foreground manual scan
-  late StreamSubscription<List<ScanResult>> _scanResultsSubscription;
-  late StreamSubscription<bool> _isScanningSubscription;
-
   bool _isBackgroundServiceRunning = false;
-
   @override
   void initState() {
     super.initState();
@@ -369,39 +432,38 @@ class _ScanScreenState extends State<ScanScreen> {
       if (state == BluetoothAdapterState.off && _isBackgroundServiceRunning) {
         _showErrorSnackbar("Bluetooth turned off, background scan may be paused.");
       }
-    });
-
-    // Listener for FOREGROUND scan results
-    _scanResultsSubscription = FlutterBluePlus.scanResults.listen((results) {
-      if (!_isScanning) return; // Only process if foreground scan is active
-
-      List<Map<String, dynamic>> newProcessedResults = [];
-      for (ScanResult r in results) {
-        final fmdnData = parseFMDNData(r);
-        if (fmdnData != null) {
-          newProcessedResults.add({'result': r, 'fmdn': fmdnData});
+    });    // Listen for data from background service for UI updates
+    FlutterBackgroundService().on('foundDevice').listen((event) {
+      if (mounted && event != null) {
+        // Print detailed debug info
+        debugPrint('🔍 UI: RECEIVED DEVICE: ${event['name'] ?? 'Unknown'} | ID: ${event['device']} | RSSI: ${event['rssi']}');
+        if (event['location'] != null) {
+          debugPrint('📍 LOCATION: Lat ${event['location']['latitude']}, Lng ${event['location']['longitude']}');
         }
-      }
-      if (mounted) {
-        setState(() {
-          _processedScanResults.clear();
-          _processedScanResults.addAll(newProcessedResults);
-        });
-      }
-    }, onError: (e) => debugPrint('Foreground Scan error: $e'));
-
-    // Listener for global scanning state (can be foreground or background)
-    _isScanningSubscription = FlutterBluePlus.isScanning.listen((state) {
-      // This state reflects if ANY scan is happening.
-      // We manage `_isScanning` specifically for the manual foreground scan button.
-      if (mounted && !_isBackgroundServiceRunning && _isScanning != state) {
-         // If background service is not running, this state directly reflects manual scan
-         // setState(() => _isScanning = state); // Let _toggleScan manage this for manual scans
+        if (event['fmdn'] != null) {
+          debugPrint('🔑 FMDN EID: ${event['fmdn']['eid']}');
+        }
+        
+        // Show a snackbar when a device is found
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Found device: ${event['name'] ?? 'Unknown'}'),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 2),
+            action: SnackBarAction(
+              label: 'View on Map',
+              textColor: Colors.white,
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const MapScreen()),
+                );
+              },
+            ),
+          ),
+        );
       }
     });
-
-    // Optional: Listen for data from background service if needed in UI
-    // FlutterBackgroundService().on('foundDevice').listen((event) { ... });
   }
 
   Future<void> _checkBackgroundServiceStatus() async {
@@ -478,76 +540,9 @@ class _ScanScreenState extends State<ScanScreen> {
     }
   }
 
-  Future<void> _toggleScan() async { // Manual FOREGROUND scan
-    if (!mounted) return;
-
-    if (_adapterState != BluetoothAdapterState.on) {
-      _showErrorSnackbar('Bluetooth is not enabled');
-      return;
-    }
-
-    // Optional: Prevent manual scan if background scan is very active,
-    // or just let them run concurrently if flutter_blue_plus handles it well.
-    // if (_isBackgroundServiceRunning) {
-    //   _showInfoSnackbar('Background scan is active. Manual scan will run concurrently.');
-    // }
-
-    bool currentSystemScanState = await FlutterBluePlus.isScanning.first;
-
-    if (_isScanning) { // If UI thinks it's scanning (manual scan)
-      try {
-        await FlutterBluePlus.stopScan();
-        debugPrint('Manual scan stopped by toggle.');
-        if(mounted) setState(() => _isScanning = false);
-      } catch (e) {
-        _showErrorSnackbar('Error stopping manual scan: $e');
-        if(mounted) setState(() => _isScanning = false); // ensure UI updates
-      }
-    } else { // If UI thinks it's not scanning (manual scan)
-      if (currentSystemScanState && !_isBackgroundServiceRunning) {
-        // If system is scanning but it's not our background service,
-        // it might be a leftover scan. Try to stop it first.
-        await FlutterBluePlus.stopScan();
-        await Future.delayed(const Duration(milliseconds: 200)); // give it a moment
-      }
-      if (mounted) {
-        setState(() {
-          _processedScanResults.clear();
-          _isScanning = true;
-        });
-      }
-      try {
-        await FlutterBluePlus.startScan(
-          timeout: const Duration(seconds: 30), // Manual scan timeout
-        );
-        debugPrint('Manual scan started');
-        // After timeout, flutter_blue_plus should stop scanning.
-        // The _isScanningSubscription should update _isScanning,
-        // but as a fallback:
-        Future.delayed(const Duration(seconds: 31), () {
-          if (mounted && _isScanning) {
-             FlutterBluePlus.isScanning.first.then((isStillScanning) {
-               if (mounted && _isScanning && !isStillScanning) {
-                 setState(() => _isScanning = false);
-               }
-             });
-          }
-        });
-      } catch (e) {
-        _showErrorSnackbar('Error starting manual scan: $e');
-        if(mounted) setState(() => _isScanning = false);
-      }
-    }
-  }
-
   @override
   void dispose() {
     _adapterStateStateSubscription.cancel();
-    _scanResultsSubscription.cancel();
-    _isScanningSubscription.cancel();
-    if (FlutterBluePlus.isScanningNow) { // Check actual scanning state
-      FlutterBluePlus.stopScan();
-    }
     super.dispose();
   }
 
@@ -598,18 +593,6 @@ class _ScanScreenState extends State<ScanScreen> {
       );
     }
   }
-   void _showInfoSnackbar(String message) {
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(message),
-          backgroundColor: Colors.blueAccent,
-          duration: const Duration(seconds: 3),
-        ),
-      );
-    }
-  }
-
 
   Widget _buildDeviceList() {
     if (_adapterState != BluetoothAdapterState.on) {
@@ -620,142 +603,165 @@ class _ScanScreenState extends State<ScanScreen> {
       );
     }
 
-    if (_processedScanResults.isEmpty) {
-      return Center(
-        child: Text(
-          _isScanning // This refers to foreground manual scan
-            ? 'Scanning for devices (manual)...'
-            : _isBackgroundServiceRunning 
-              ? 'Background scan active.\nPress START SCAN for manual foreground scan.'
-              : 'Press START SCAN for manual scan.',
-          textAlign: TextAlign.center,
-          style: const TextStyle(fontSize: 18),
-        ),
-      );
-    }
-    return ListView.builder(
-      itemCount: _processedScanResults.length,
-      itemBuilder: (context, index) {
-        final Map<String, dynamic> result = _processedScanResults[index];
-        final ScanResult scanResult = result['result'] as ScanResult;
-        final Map<String, dynamic> fmdnData = result['fmdn'] as Map<String, dynamic>;
-
-        String deviceName = scanResult.device.platformName.isNotEmpty 
-            ? scanResult.device.platformName 
-            : 'Unknown Device';
-
-        return Card(
-          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          child: ListTile(
-            title: Text(deviceName,
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            subtitle: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('RSSI: ${scanResult.rssi} dBm',
-                  style: const TextStyle(fontFamily: 'monospace')),
-                Text('Frame: 0x${fmdnData['frameType'].toRadixString(16).padLeft(2, '0')}',
-                  style: const TextStyle(fontFamily: 'monospace')),
-                SelectableText('EID: ${fmdnData['eid']}',
-                  style: const TextStyle(fontFamily: 'monospace')),
-                Text('Flags: 0x${fmdnData['flags'].toRadixString(16).padLeft(2, '0')}',
-                  style: const TextStyle(fontFamily: 'monospace')),
-              ],
-            ),
-            isThreeLine: true,
-          ),
-        );
-      },
+    // Simplified: No longer displays foreground scan results or "Press START SCAN"
+    return Center(
+      child: Text(
+        _isBackgroundServiceRunning 
+          ? 'Background scanning is active.'
+          : 'Background service is not running. Start it using the button below.',
+        textAlign: TextAlign.center,
+        style: const TextStyle(fontSize: 18),
+      ),
     );
   }
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
+    return Scaffold(      appBar: AppBar(
         title: const Text('BLE Scanner'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        actions: [
+          // Test API button
+          IconButton(
+            icon: const Icon(Icons.api),
+            tooltip: 'Test Service API',
+            onPressed: _testBackgroundServiceCommunication,
+          ),
+          // Test button for API testing
+          IconButton(
+            icon: const Icon(Icons.bug_report),
+            tooltip: 'Simulate Device',
+            onPressed: _simulateDeviceFound,
+          ),
+          // Map view button
+          IconButton(
+            icon: const Icon(Icons.map),
+            tooltip: 'View Tracker Map',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const MapScreen()),
+              );
+            },
+          ),
+        ],
       ),
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.all(12.0),
+            padding: const EdgeInsets.all(16.0),
             child: Column(
               children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'Bluetooth: ${_adapterState.toString().split('.').last.toUpperCase()}',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: _adapterState == BluetoothAdapterState.on 
-                          ? Colors.green.shade700 
-                          : Colors.red.shade700,
-                      ),
-                    ),
-                    if (_isScanning) // Indicator for manual foreground scan
-                      const SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2.5),
-                      ),
-                  ],
+                Text(
+                  'Adapter State: ${_adapterState.toString().split('.').last}',
+                  style: TextStyle(
+                      fontSize: 16,
+                      color: _adapterState == BluetoothAdapterState.on
+                          ? Colors.green
+                          : Colors.red),
                 ),
-                const SizedBox(height: 10),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                     Text(
-                      'Background Scan:',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: Theme.of(context).colorScheme.onSurface,
-                      ),
-                    ),
-                    ElevatedButton.icon(
-                      icon: Icon(_isBackgroundServiceRunning ? Icons.stop_circle_outlined : Icons.play_circle_outline),
-                      onPressed: _toggleBackgroundService,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _isBackgroundServiceRunning ? Colors.orangeAccent : Colors.lightGreenAccent.shade700,
-                        foregroundColor: _isBackgroundServiceRunning ? Colors.black : Colors.white,
-                      ),
-                      label: Text(_isBackgroundServiceRunning ? 'Stop BG' : 'Start BG'),
-                    ),
-                  ],
+                const SizedBox(height: 8),
+                Text(
+                  'Background Service: ${_isBackgroundServiceRunning ? "Running" : "Stopped"}',
+                  style: TextStyle(
+                      fontSize: 16,
+                      color: _isBackgroundServiceRunning
+                          ? Colors.green
+                          : Colors.orange),
                 ),
-                 if (_isBackgroundServiceRunning)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4.0),
-                    child: Text(
-                      'Service is active in background.',
-                      style: TextStyle(fontSize: 12, color: Colors.blueGrey.shade700),
-                    ),
-                  ),
               ],
             ),
           ),
-          const Divider(height: 1),
-          Expanded(child: _buildDeviceList()),
+          const Divider(),
+          Expanded(child: _buildDeviceList()), // This now shows status text
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        heroTag: 'manual_scan_fab',
-        onPressed: (_adapterState == BluetoothAdapterState.on) ? _toggleScan : null,
-        label: Text(
-          _isScanning ? 'STOP SCAN' : 'START SCAN', // For manual foreground scan
-        ),
-        icon: Icon(
-          _isScanning ? Icons.stop : Icons.search,
-        ),
-        backgroundColor: _isScanning 
-            ? Colors.redAccent 
-            : (_adapterState == BluetoothAdapterState.on ? Theme.of(context).colorScheme.primary : Colors.grey),
-        foregroundColor: Theme.of(context).colorScheme.onPrimary,
+        onPressed: _toggleBackgroundService,
+        label: Text(_isBackgroundServiceRunning ? 'Stop Background Service' : 'Start Background Service'),
+        icon: Icon(_isBackgroundServiceRunning ? Icons.stop : Icons.play_arrow),
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
     );
+  }
+  // DEBUG METHOD: Simulate finding a device for testing
+  Future<void> _simulateDeviceFound() async {
+    try {
+      // Get current location
+      Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+      
+      // Create a simulated device event
+      final event = {
+        'device': 'simulated-device-${DateTime.now().millisecondsSinceEpoch}',
+        'name': 'Test Device',
+        'fmdn': {
+          'frameType': 0,
+          'eid': 'simulated-eid-${DateTime.now().millisecondsSinceEpoch.toString().substring(5)}',
+          'flags': 0,
+        },
+        'rssi': -65,
+        'location': {
+          'latitude': position.latitude,
+          'longitude': position.longitude,
+          'accuracy': position.accuracy,
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+        }
+      };
+      
+      // Log the simulated event
+      debugPrint('📱 SIMULATING DEVICE: ${event['name']} at ${position.latitude}, ${position.longitude}');
+      
+      // Send to the service to broadcast (this will trigger the UI listeners)
+      final service = FlutterBackgroundService();
+      service.invoke('foundDevice', event);
+    } catch (e) {
+      debugPrint('❌ Error simulating device: $e');
+    }
+  }  // Test if background service communication is working
+  Future<void> _testBackgroundServiceCommunication() async {
+    if (!_isBackgroundServiceRunning) {
+      _showErrorSnackbar('Background service is not running. Start it first.');
+      return;
+    }
+    
+    final service = FlutterBackgroundService();
+    
+    // Register temporary listener to get confirmation
+    bool gotResponse = false;
+    late StreamSubscription subscription;
+    
+    debugPrint('🧪 Testing background service communication...');
+    
+    // Create a one-time listener for the ping response
+    subscription = service.on('pingResponse').listen((event) {
+      debugPrint('✅ Received ping response from background service: $event');
+      gotResponse = true;
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Background service communication is working! ✅'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+      
+      subscription.cancel();
+    });
+    
+    // Send the ping
+    service.invoke('ping', {'timestamp': DateTime.now().millisecondsSinceEpoch});
+    
+    // Give it a moment to respond
+    await Future.delayed(const Duration(seconds: 2));
+    
+    if (!gotResponse) {
+      debugPrint('❌ No ping response received from background service');
+      if (mounted) {
+        _showErrorSnackbar('No response from background service. Communication may be broken.');
+      }
+      subscription.cancel();
+    }
   }
 }

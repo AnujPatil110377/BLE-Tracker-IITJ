@@ -34,6 +34,10 @@
         android:label="ble_beacon_tracker"
         android:icon="@mipmap/ic_launcher">
 
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="AIzaSyCGjIgMAyNVNsD9XZmKpum2puwtzMIVDTg"/>
+
         <service
             android:name="id.flutter.flutter_background_service.BackgroundService"
             android:exported="false"

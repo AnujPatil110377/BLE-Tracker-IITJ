@@ -92,9 +92,7 @@ class BeaconScanTaskHandler extends TaskHandler {
   }
 
   void _handleScanResult(ScanResult result) async {
-    if (_prefs == null) {
-      _prefs = await SharedPreferences.getInstance();
-    }
+    _prefs ??= await SharedPreferences.getInstance();
 
     final fmdnData = _parseFMDNData(result);
     if (fmdnData == null) return;
