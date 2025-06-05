@@ -245,12 +245,6 @@ class _MapScreenState extends State<MapScreen> {
         title: const Text('Tracker Map'),
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
         actions: [
-          // Debug button - only for testing
-          IconButton(
-            icon: const Icon(Icons.bug_report),
-            tooltip: 'Add Test Markers',
-            onPressed: _addDebugMarkers,
-          ),
           IconButton(
             icon: const Icon(Icons.my_location),
             onPressed: () {
@@ -294,23 +288,23 @@ class _MapScreenState extends State<MapScreen> {
         height: 200,
         decoration: BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.only(
+          borderRadius: const BorderRadius.only(
             topLeft: Radius.circular(15),
             topRight: Radius.circular(15),
           ),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withAlpha(25), // 0.1 * 255 ≈ 25
+              color: Colors.black.withOpacity(0.1),
               blurRadius: 10,
-              offset: Offset(0, -5),
+              offset: const Offset(0, -5),
             ),
           ],
         ),
         child: Column(
           children: [
             Container(
-              padding: EdgeInsets.symmetric(vertical: 10),
-              child: Text(
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              child: const Text(
                 'Tracked Devices',
                 style: TextStyle(
                   fontSize: 18,
@@ -318,7 +312,7 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ),
             ),
-            Divider(height: 1),
+            const Divider(height: 1),
             Expanded(
               child: _trackers.isEmpty
                   ? const Center(child: Text('No devices found yet'))
@@ -328,7 +322,7 @@ class _MapScreenState extends State<MapScreen> {
                         final tracker = _trackers[index];
                         return ListTile(
                           leading: CircleAvatar(
-                            backgroundColor: Colors.blue.withAlpha(51), // 0.2 * 255 ≈ 51
+                            backgroundColor: Colors.blue.withOpacity(0.2),
                             child: const Icon(Icons.bluetooth, color: Colors.blue),
                           ),
                           title: Text(tracker.name),
@@ -357,44 +351,6 @@ class _MapScreenState extends State<MapScreen> {
         ),
       ),
     );
-  }
-  
-  // For testing only - add debug data markers
-  void _addDebugMarkers() {
-    // Add current user location as a debug point
-    if (_currentUserPosition != null) {
-      setState(() {
-        _trackers.add(
-          TrackerDevice(
-            id: "debug_test1",
-            name: "Debug Test Device 1",
-            lat: _currentUserPosition!.latitude + 0.0005,
-            lng: _currentUserPosition!.longitude + 0.0005,
-            lastSeen: DateTime.now(),
-            accuracy: 3.0,
-            rssi: -65,
-          ),
-        );
-        
-        _trackers.add(
-          TrackerDevice(
-            id: "debug_test2",
-            name: "Debug Test Device 2",
-            lat: _currentUserPosition!.latitude - 0.0005,
-            lng: _currentUserPosition!.longitude - 0.0005,
-            lastSeen: DateTime.now(),
-            accuracy: 5.0,
-            rssi: -75,
-          ),
-        );
-        
-        debugPrint("Added debug markers at: ${_currentUserPosition!.latitude}, ${_currentUserPosition!.longitude}");
-        _updateMarkers();
-        _updateMapCamera();
-      });
-    } else {
-      debugPrint("Cannot add debug markers - current position unknown");
-    }
   }
   
   // Unused method, can be removed
