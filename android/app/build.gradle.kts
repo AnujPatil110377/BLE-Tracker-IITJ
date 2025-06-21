@@ -3,7 +3,10 @@ plugins {
     id("kotlin-android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+    id("com.google.gms.google-services")
+    
 }
+
 
 android {
     namespace = "com.example.ble_beacon_tracker"
@@ -25,7 +28,7 @@ android {
         applicationId = "com.example.ble_beacon_tracker"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = 21
+        minSdk = 23
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -45,7 +48,9 @@ flutter {
 }
 
 dependencies {
+    implementation(platform("com.google.firebase:firebase-bom:33.15.0"))
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
     implementation("androidx.core:core:1.12.0")
     implementation("androidx.core:core-ktx:1.12.0")
+    implementation("com.google.firebase:firebase-analytics")
 }

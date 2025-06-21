@@ -5,6 +5,9 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart'; // Added for permission checks
+import '../add_tracker_screen.dart'; // Add this import
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 
 // Model for tracker data - can be expanded
 class TrackerDevice {
@@ -25,6 +28,25 @@ class TrackerDevice {
     this.lastLocation,
     this.lastTimestamp,
   });
+}
+
+class AuthService {
+  static Future<User?> signInWithGoogle() async {
+    final GoogleSignInAccount? googleUser = await GoogleSignIn().signIn();
+    if (googleUser == null) return null;
+    final GoogleSignInAuthentication googleAuth = await googleUser.authentication;
+    final credential = GoogleAuthProvider.credential(
+      accessToken: googleAuth.accessToken,
+      idToken: googleAuth.idToken,
+    );
+    final userCredential = await FirebaseAuth.instance.signInWithCredential(credential);
+    return userCredential.user;
+  }
+
+  static Future<void> signOut() async {
+    await GoogleSignIn().signOut();
+    await FirebaseAuth.instance.signOut();
+  }
 }
 
 class TrackerHomeScreen extends StatefulWidget {
@@ -298,10 +320,11 @@ class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
   }
 
 
-  void _showSettings(BuildContext context) { // Pass context
+  void _showSettings(BuildContext context) {
+    final user = FirebaseAuth.instance.currentUser;
     showModalBottomSheet(
       context: context,
-      backgroundColor: _surfaceColor,          // sheet surface
+      backgroundColor: _surfaceColor,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
@@ -309,27 +332,47 @@ class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           ListTile(
-            leading: Icon(_isBackgroundServiceRunning ? Icons.stop_circle_outlined : Icons.play_circle_outline, color: Colors.white70),
-            title: Text(_isBackgroundServiceRunning ? "Stop Background Service" : "Start Background Service"),
-            onTap: () {
-              Navigator.pop(ctx); // Close bottom sheet
-              _toggleBackgroundService();
-            },
-          ),
-          const Divider(color: Colors.white24, height: 1),
-          ListTile(
             leading: const Icon(Icons.account_circle, color: Colors.white70),
-            title: const Text("Profile"),
-            onTap: () {
-              // TODO: Implement Profile
-              Navigator.pop(ctx);
-            },
+            title: Text(
+              user != null
+                  ? (user.displayName ?? user.email ?? "Signed In")
+                  : "Not Signed In",
+              style: const TextStyle(color: Colors.white),
+            ),
           ),
+          if (user == null)
+            ListTile(
+              leading: const Icon(Icons.login, color: Colors.green),
+              title: const Text("Sign in with Google", style: TextStyle(color: Colors.white)),
+              onTap: () async {
+                Navigator.pop(ctx);
+                final signedInUser = await AuthService.signInWithGoogle();
+                if (signedInUser != null && context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text("Signed in as "+(signedInUser.displayName ?? signedInUser.email ?? ""))),
+                  );
+                }
+              },
+            ),
+          if (user != null)
+            ListTile(
+              leading: const Icon(Icons.logout, color: Colors.red),
+              title: const Text("Sign Out", style: TextStyle(color: Colors.white)),
+              onTap: () async {
+                Navigator.pop(ctx);
+                await AuthService.signOut();
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("Signed out")),
+                  );
+                }
+              },
+            ),
+          const Divider(color: Colors.white24, height: 1),
           ListTile(
             leading: const Icon(Icons.settings, color: Colors.white70),
             title: const Text("Settings"),
             onTap: () {
-              // TODO: Implement Settings
               Navigator.pop(ctx);
             },
           ),
@@ -459,6 +502,17 @@ class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
                   ),
           ),
         ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(builder: (context) => AddTrackerScreen()),
+          );
+        },
+        backgroundColor: Colors.teal,
+        child: const Icon(Icons.add, color: Colors.white),
+        tooltip: 'Add Tracker',
       ),
     );
   }

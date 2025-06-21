@@ -8,6 +8,7 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart'; // Added
 import 'package:geolocator/geolocator.dart'; // Added for location fetching
 import 'package:ble_beacon_tracker/screens/tracker_home_screen.dart'; // Import the new home screen
+import 'package:firebase_core/firebase_core.dart';
 
 // MOVED TO TOP LEVEL and made accessible for background service
 Map<String, dynamic>? parseFMDNData(ScanResult scanResult) {
@@ -361,6 +362,7 @@ Future<void> initializeService() async {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
   
   // Request permissions
   if (Platform.isAndroid) {
@@ -385,20 +387,39 @@ class BLEScannerApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'BLE FMDN Scanner',
-      theme: ThemeData.dark().copyWith(
-        colorScheme: ColorScheme.dark(
-          primary: Colors.teal,
-          secondary: Colors.orange,
-        ),
-        scaffoldBackgroundColor: Colors.black,
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Colors.black,
-          foregroundColor: Colors.white,
-        ),
-      ),
-      home: const TrackerHomeScreen(), // UPDATED to TrackerHomeScreen
+    return FutureBuilder(
+      future: Firebase.initializeApp(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.done) {
+          return MaterialApp(
+            title: 'BLE FMDN Scanner',
+            theme: ThemeData.dark().copyWith(
+              colorScheme: ColorScheme.dark(
+                primary: Colors.teal,
+                secondary: Colors.orange,
+              ),
+              scaffoldBackgroundColor: Colors.black,
+              appBarTheme: const AppBarTheme(
+                backgroundColor: Colors.black,
+                foregroundColor: Colors.white,
+              ),
+            ),
+            home: const TrackerHomeScreen(),
+          );
+        }
+        if (snapshot.hasError) {
+          return MaterialApp(
+            home: Scaffold(
+              body: Center(child: Text('Firebase init error: ${snapshot.error}')),
+            ),
+          );
+        }
+        return MaterialApp(
+          home: Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          ),
+        );
+      },
     );
   }
 }
