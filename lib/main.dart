@@ -9,12 +9,17 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart'; /
 import 'package:geolocator/geolocator.dart'; // Added for location fetching
 import 'package:ble_beacon_tracker/screens/tracker_home_screen.dart'; // Import the new home screen
 import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart'; // Added for Firestore access
+import 'services/crypto_service.dart'; // Importing CryptoService
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 // MOVED TO TOP LEVEL and made accessible for background service
 Map<String, dynamic>? parseFMDNData(ScanResult scanResult) {
   try {
     final serviceData = scanResult.advertisementData.serviceData;
-
+    // Debugging line to check serviceData type
+    debugPrint("Service Data Type: ${serviceData.runtimeType}");
     final fmdnKey = serviceData.keys.firstWhere(
         (uuid) => uuid.toString().toLowerCase().contains('feaa'),
         orElse: () => Guid('00000000-0000-0000-0000-000000000000'));
@@ -47,7 +52,8 @@ Map<String, dynamic>? parseFMDNData(ScanResult scanResult) {
 
 @pragma('vm:entry-point') // Mandatory for Android
 void onStart(ServiceInstance service) async {
-  DartPluginRegistrant.ensureInitialized(); 
+  DartPluginRegistrant.ensureInitialized();
+  await Firebase.initializeApp(); // Ensure Firebase is initialized in background
 
   // Add a small delay to allow the isolate to fully initialize
   // before heavy plugin interaction. This is a common workaround for
@@ -183,9 +189,9 @@ void onStart(ServiceInstance service) async {
               
               // If location available, log it and send to UI
               if (currentLocation != null) {
-                debugPrint("BackgroundService: Location: Lat ${currentLocation.latitude.toStringAsFixed(5)}, " +
+                debugPrint("BackgroundService: Location: Lat "+
+                    "${currentLocation.latitude.toStringAsFixed(5)}, " +
                     "Lon ${currentLocation.longitude.toStringAsFixed(5)} (Acc: ${currentLocation.accuracy.toStringAsFixed(1)}m)");
-                
                 // Send data to UI for map display
                 service.invoke('foundDevice', {
                   'device': r.device.remoteId.toString(),
@@ -199,6 +205,17 @@ void onStart(ServiceInstance service) async {
                     'timestamp': DateTime.now().millisecondsSinceEpoch,
                   }
                 });
+                // Upload encrypted location to Firestore
+                try {
+                  await publishEncryptedLocation(
+                    fmdnData['eid'],
+                    currentLocation.latitude,
+                    currentLocation.longitude,
+                    DateTime.now().millisecondsSinceEpoch,
+                  );
+                } catch (e, st) {
+                  debugPrint('[LocationUpload] Exception in background: $e\n$st');
+                }
               } else {
                 debugPrint("BackgroundService: Location: Not available");
               }
@@ -421,5 +438,80 @@ class BLEScannerApp extends StatelessWidget {
         );
       },
     );
+  }
+}
+
+// Move this function to top-level (outside any class)
+Future<void> publishEncryptedLocation(String eid, double latitude, double longitude, int timestamp) async {
+  print('[LocationUpload] Checking EID: $eid');
+  final firestore = FirebaseFirestore.instance;
+  try {
+    final trackerRef = firestore.collection('trackers').doc(eid);
+    final trackerDoc = await trackerRef.get();
+    print('[LocationUpload] Firestore doc exists: ${trackerDoc.exists}');
+    if (!trackerDoc.exists) {
+      print('[LocationUpload] EID $eid not registered, skipping location upload.');
+      return;
+    }
+    final publicKeyBase64 = trackerDoc.data()?['publicKey'];
+    print('[LocationUpload] Fetched public key: $publicKeyBase64');
+    if (publicKeyBase64 == null || publicKeyBase64.isEmpty) {
+      print('[LocationUpload] No public key for EID $eid, cannot encrypt location.');
+      return;
+    }
+    final publicKey = CryptoService.deserializePublicKey(publicKeyBase64);
+    final locationPayload = '{"lat":$latitude,"lng":$longitude,"ts":$timestamp}';
+    print('[LocationUpload] Payload to encrypt: $locationPayload');
+    final encrypted = CryptoService.encryptWithPublicKey(publicKey, locationPayload);
+    print('[LocationUpload] Encrypted payload: $encrypted');
+    // Update the array in the tracker document
+    await trackerRef.update({
+      'data.location+time': FieldValue.arrayUnion([encrypted]),
+    });
+    print('[LocationUpload] Encrypted location appended to array for EID $eid');
+  } catch (e, st) {
+    print('[LocationUpload] ERROR: $e\n$st');
+  }
+}
+
+Future<void> fetchAndDecryptUserTrackerLocations() async {
+  final user = FirebaseAuth.instance.currentUser;
+  if (user == null) {
+    print('[LocationFetch] User not signed in.');
+    return;
+  }
+  final firestore = FirebaseFirestore.instance;
+  final userDoc = await firestore.collection('User').doc(user.uid).get();
+  final trackers = userDoc.data()?['trackers'] as Map<String, dynamic>?;
+  if (trackers == null || trackers.isEmpty) {
+    print('[LocationFetch] No trackers linked to this account.');
+    return;
+  }
+  final storage = const FlutterSecureStorage();
+  for (final eid in trackers.keys) {
+    print('[LocationFetch] Fetching locations for EID: $eid');
+    final trackerDoc = await firestore.collection('trackers').doc(eid).get();
+    final data = trackerDoc.data()?['data'] as Map<String, dynamic>?;
+    if (data == null || data['location+time'] == null) {
+      print('[LocationFetch] No location data for EID: $eid');
+      continue;
+    }
+    final List<dynamic> encryptedArray = data['location+time'];
+    final privateKeyB64 = await storage.read(key: eid);
+    if (privateKeyB64 == null) {
+      print('[LocationFetch] No private key found for EID: $eid');
+      continue;
+    }
+    final privateKey = CryptoService.deserializePrivateKey(privateKeyB64);
+    for (final encrypted in encryptedArray) {
+      try {
+        final decrypted = CryptoService.decryptWithPrivateKey(privateKey, encrypted);
+        final loc = jsonDecode(decrypted);
+        print('[LocationFetch] EID: $eid, Lat: ${loc['lat']}, Lng: ${loc['lng']}, Time: ${DateTime.fromMillisecondsSinceEpoch(loc['ts'])}');
+        // Here you can add code to update the map UI with (loc['lat'], loc['lng'])
+      } catch (e) {
+        print('[LocationFetch] Failed to decrypt location for EID $eid: $e');
+      }
+    }
   }
 }

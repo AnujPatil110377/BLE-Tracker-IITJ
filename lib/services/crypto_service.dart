@@ -122,6 +122,47 @@ class CryptoService {
     return key;
   }
 
+  /// Encrypts a string payload with the given ECPublicKey using ECDH + AES-GCM (ECIES-like)
+  static String encryptWithPublicKey(ECPublicKey publicKey, String plaintext) {
+    // Generate ephemeral key pair
+    final params = ECDomainParameters('prime256v1');
+    final keyParams = ECKeyGeneratorParameters(params);
+    final random = FortunaRandom();
+    final seed = List<int>.generate(32, (i) => DateTime.now().millisecondsSinceEpoch % 256);
+    random.seed(KeyParameter(Uint8List.fromList(seed)));
+    final generator = ECKeyGenerator();
+    generator.init(ParametersWithRandom(keyParams, random));
+    final ephemeralKeyPair = generator.generateKeyPair();
+    final ephemeralPrivateKey = ephemeralKeyPair.privateKey as ECPrivateKey;
+    final ephemeralPublicKey = ephemeralKeyPair.publicKey as ECPublicKey;
+
+    // ECDH shared secret (fix: use ECPoint multiplication)
+    final sharedSecret = (publicKey.Q! * ephemeralPrivateKey.d!)!.getEncoded();
+
+    // Derive AES key from shared secret (SHA-256)
+    final aesKey = Digest('SHA-256').process(Uint8List.fromList(sharedSecret));
+
+    // Encrypt plaintext with AES-GCM
+    final iv = Uint8List(12);
+    for (int i = 0; i < iv.length; i++) {
+      iv[i] = random.nextUint8();
+    }
+    final gcm = GCMBlockCipher(AESEngine());
+    final aeadParams = AEADParameters(KeyParameter(aesKey), 128, iv, Uint8List(0));
+    gcm.init(true, aeadParams);
+    final input = utf8.encode(plaintext);
+    final cipherText = gcm.process(Uint8List.fromList(input));
+
+    // Output: ephemeral public key + iv + ciphertext (all base64)
+    final ephemeralPubBytes = ephemeralPublicKey.Q!.getEncoded(false);
+    final out = jsonEncode({
+      'ephemeral': base64Encode(ephemeralPubBytes),
+      'iv': base64Encode(iv),
+      'ct': base64Encode(cipherText),
+    });
+    return out;
+  }
+
   // --- Utility Functions ---
   static SecureRandom _getSecureRandom() {
     final secureRandom = FortunaRandom();

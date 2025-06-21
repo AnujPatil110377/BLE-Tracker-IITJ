@@ -59,7 +59,7 @@ Future<void> registerEidAndKeys(String eid, {BuildContext? context}) async {
       'publicKey': publicKey,
       'registered': true,
       'data': {
-        'location+time': '', // initially empty
+        'location+time': [], // now an empty array
       },
       eid: publicKey, // EID as key, publicKey as value
     }, SetOptions(merge: true));
