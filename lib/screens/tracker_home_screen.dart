@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -8,6 +9,10 @@ import 'package:permission_handler/permission_handler.dart'; // Added for permis
 import '../add_tracker_screen.dart'; // Add this import
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../../services/crypto_service.dart';
 
 // Model for tracker data - can be expanded
 class TrackerDevice {
@@ -50,7 +55,7 @@ class AuthService {
 }
 
 class TrackerHomeScreen extends StatefulWidget {
-  const TrackerHomeScreen({super.key});
+  const TrackerHomeScreen({Key? key}) : super(key: key);
 
   @override
   State<TrackerHomeScreen> createState() => _TrackerHomeScreenState();
@@ -68,6 +73,11 @@ class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
   StreamSubscription? _pingResponseSubscription;
   bool _isLoadingLocation = true;
   bool _suppressAutoCamera = false; // Flag to suppress auto-zoom
+
+  List<Map<String, dynamic>> decryptedLocations = [];
+  bool loading = true;
+
+  Timer? _refreshTimer; // Timer to refresh locations
 
   static const String _darkMapStyle = '''[
     {"elementType":"geometry","stylers":[{"color":"#242f3e"}]},
@@ -95,7 +105,10 @@ class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
     _checkBackgroundServiceStatus();
     _initializeListeners();
     _determineUserPosition();
-    // TODO: Call _checkAndStartBackgroundService if needed, or rely on autoStart
+    fetchLocations();
+    _refreshTimer = Timer.periodic(const Duration(minutes: 1), (timer) {
+      fetchLocations();
+    });
   }
 
   @override
@@ -105,6 +118,7 @@ class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
     _positionStreamSubscription?.cancel();
     _foundDeviceSubscription?.cancel();
     _pingResponseSubscription?.cancel();
+    _refreshTimer?.cancel();
     super.dispose();
   }
 
@@ -381,6 +395,67 @@ class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
     );
   }
 
+  Future<void> fetchLocations() async {
+    setState(() { loading = true; });
+    decryptedLocations.clear();
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      setState(() { loading = false; });
+      return;
+    }
+    final firestore = FirebaseFirestore.instance;
+    final userDoc = await firestore.collection('User').doc(user.uid).get();
+    final trackers = userDoc.data()?['trackers'] as Map<String, dynamic>?;
+    if (trackers == null || trackers.isEmpty) {
+      setState(() { loading = false; });
+      return;
+    }
+    final storage = const FlutterSecureStorage();
+    for (final eid in trackers.keys) {
+      final trackerDoc = await firestore.collection('trackers').doc(eid).get();
+      final data = trackerDoc.data()?['data'] as Map<String, dynamic>?;
+      if (data == null || data['location+time'] == null) continue;
+      List<String> encryptedArray = [];
+      if (data['location+time'] is List) {
+        encryptedArray = (data['location+time'] as List).whereType<String>().toList();
+      } else if (data['location+time'] is String && (data['location+time'] as String).isNotEmpty) {
+        try {
+          final decodedList = jsonDecode(data['location+time'] as String);
+          if (decodedList is List) {
+            encryptedArray = decodedList.whereType<String>().toList();
+          }
+        } catch (e) {
+          print('Error decoding location+time string for EID $eid: $e');
+        }
+      }
+      final privateKeyB64 = await storage.read(key: eid);
+      if (privateKeyB64 == null) continue;
+      final privateKey = CryptoService.deserializePrivateKey(privateKeyB64);
+      Map<String, dynamic>? latestLoc;
+      for (final encrypted in encryptedArray) {
+        if (encrypted.isEmpty) continue;
+        try {
+          final decrypted = CryptoService.decryptWithPrivateKey(privateKey, encrypted);
+          final loc = jsonDecode(decrypted);
+          if (latestLoc == null || (loc['ts'] != null && loc['ts'] > (latestLoc['ts'] ?? 0))) {
+            latestLoc = {
+              'eid': eid,
+              'lat': loc['lat'],
+              'lng': loc['lng'],
+              'ts': loc['ts'],
+            };
+          }
+        } catch (e) {
+          print('Failed to decrypt location for EID $eid: $e');
+        }
+      }
+      if (latestLoc != null) {
+        decryptedLocations.add(latestLoc);
+      }
+    }
+    setState(() { loading = false; });
+  }
+
   @override
   Widget build(BuildContext context) {
     List<TrackerDevice> trackerList = _trackers.values.toList();
@@ -438,81 +513,70 @@ class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
           const SizedBox(height: 8),  // add gap between map and list
           Expanded(
             flex: 1,
-            child: trackerList.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Icon(Icons.search_off, size: 48, color: Colors.white38),
-                        const SizedBox(height: 16),
-                        Text(
-                          _isBackgroundServiceRunning
-                              ? "Scanning for devices..."
-                              : "Start background service to find trackers.",
-                          style: const TextStyle(color: Color(0xFFCCCCCC), fontSize: 16),
-                          textAlign: TextAlign.center,
-                        ),
-                        if (!_isBackgroundServiceRunning)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 20.0),
-                            child: ElevatedButton.icon(
-                              icon: const Icon(Icons.play_arrow),
-                              label: const Text("Start Service"),
-                              onPressed: _toggleBackgroundService,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: _accentAqua,              // accent aqua
-                                foregroundColor: _primaryText,              // white text
+            child: loading
+                ? const Center(child: CircularProgressIndicator())
+                : decryptedLocations.isEmpty
+                    ? const Center(child: Text('No tracker locations found.'))
+                    : ListView.builder(
+                        padding: EdgeInsets.zero,       // remove horizontal inset
+                        itemCount: decryptedLocations.length,
+                        itemBuilder: (context, idx) {
+                          final loc = decryptedLocations[idx];
+                          return Card(
+                            color: _surfaceColor,
+                            margin: const EdgeInsets.only(bottom: 12),
+                            child: ListTile(
+                              leading: CircleAvatar(
+                                backgroundColor: _accentGreen,
+                                child: const Icon(Icons.location_on, size: 20),
                               ),
+                              title: Text(
+                                'EID: ${loc['eid']}',
+                                style: const TextStyle(color: _primaryText, fontWeight: FontWeight.w500),
+                              ),
+                              subtitle: Text(
+                                'Last seen: ${_formatTimestamp(DateTime.fromMillisecondsSinceEpoch(loc['ts']))}',
+                                style: const TextStyle(color: _secondaryText),
+                              ),
+                              onTap: () {
+                                if (loc['lat'] != null && loc['lng'] != null && _googleMapController != null) {
+                                  _googleMapController!.animateCamera(
+                                    CameraUpdate.newLatLngZoom(LatLng(loc['lat'], loc['lng']), 16.0),
+                                  );
+                                }
+                              },
                             ),
-                          )
-                      ],
-                    ),
-                  )
-                : ListView.builder(
-                    padding: EdgeInsets.zero,       // remove horizontal inset
-                    itemCount: trackerList.length,
-                    itemBuilder: (context, i) {
-                      final t = trackerList[i];
-                      return Card(
-                        color: _surfaceColor,         // full-width straight edges
-                        margin: const EdgeInsets.only(bottom: 12),
-                        child: ListTile(
-                          leading: CircleAvatar(
-                            backgroundColor: t.color,
-                            child: const Icon(Icons.location_on, size: 20),
-                          ),
-                          title: Text(
-                            t.name,
-                            style: const TextStyle(color: _primaryText, fontWeight: FontWeight.w500),
-                          ),
-                          subtitle: Text(
-                            "Last seen: ${t.lastPing}\nID: ...${t.id.substring(t.id.length - 6)}",
-                            style: const TextStyle(color: _secondaryText),
-                          ),
-                          onTap: () {
-                            if (t.lastLocation != null && _googleMapController != null) {
-                              _googleMapController!.animateCamera(
-                                CameraUpdate.newLatLngZoom(t.lastLocation!, 16.0), // fixed zoom showing ~100m radius
-                              );
-                            }
-                          },
-                        ),
-                      );
-                    },
-                  ),
+                          );
+                        },
+                      ),
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(builder: (context) => AddTrackerScreen()),
-          );
-        },
-        backgroundColor: Colors.teal,
-        child: const Icon(Icons.add, color: Colors.white),
-        tooltip: 'Add Tracker',
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          FloatingActionButton(
+            heroTag: 'service',
+            onPressed: _toggleBackgroundService,
+            backgroundColor: _isBackgroundServiceRunning ? Colors.red : Colors.green,
+            child: Icon(_isBackgroundServiceRunning ? Icons.stop : Icons.play_arrow, color: Colors.white),
+            tooltip: _isBackgroundServiceRunning ? 'Stop Service' : 'Start Service',
+          ),
+          const SizedBox(height: 12),
+          FloatingActionButton(
+            heroTag: 'add',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => AddTrackerScreen()),
+              );
+            },
+            backgroundColor: Colors.teal,
+            child: const Icon(Icons.add, color: Colors.white),
+            tooltip: 'Add Tracker',
+          ),
+        ],
       ),
     );
   }

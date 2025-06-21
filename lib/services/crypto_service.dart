@@ -163,6 +163,26 @@ class CryptoService {
     return out;
   }
 
+  /// Decrypts a string payload encrypted with encryptWithPublicKey using ECDH + AES-GCM (ECIES-like)
+  static String decryptWithPrivateKey(ECPrivateKey privateKey, String encryptedJson) {
+    final params = ECDomainParameters('prime256v1');
+    final Map<String, dynamic> enc = jsonDecode(encryptedJson);
+    final ephemeralPubBytes = base64Decode(enc['ephemeral']);
+    final iv = base64Decode(enc['iv']);
+    final ct = base64Decode(enc['ct']);
+    final ephemeralQ = params.curve.decodePoint(ephemeralPubBytes);
+    final sharedSecret = ephemeralQ! * privateKey.d!;
+    if (sharedSecret == null || sharedSecret.getEncoded() == null) {
+      throw Exception('Failed to compute shared secret or encode it.');
+    }
+    final aesKey = Digest('SHA-256').process(sharedSecret.getEncoded()!);
+    final gcm = GCMBlockCipher(AESEngine());
+    final aeadParams = AEADParameters(KeyParameter(aesKey), 128, iv, Uint8List(0));
+    gcm.init(false, aeadParams);
+    final decrypted = gcm.process(ct);
+    return utf8.decode(decrypted);
+  }
+
   // --- Utility Functions ---
   static SecureRandom _getSecureRandom() {
     final secureRandom = FortunaRandom();

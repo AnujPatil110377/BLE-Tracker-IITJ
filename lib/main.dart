@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert'; // <-- Add this line
 import 'dart:io' show Platform;
 import 'dart:ui'; // Required for DartPluginRegistrant
 import 'package:flutter/material.dart';
@@ -496,21 +497,42 @@ Future<void> fetchAndDecryptUserTrackerLocations() async {
       print('[LocationFetch] No location data for EID: $eid');
       continue;
     }
-    final List<dynamic> encryptedArray = data['location+time'];
+
+    List<dynamic> encryptedArray = [];
+    final locationData = data['location+time'];
+    if (locationData is List) {
+      encryptedArray = locationData;
+    } else if (locationData is String && locationData.isEmpty) {
+      // Treat empty string as empty list for backward compatibility
+      encryptedArray = [];
+    } else {
+      print('[LocationFetch] Unexpected type for location+time for EID: $eid. Found ${locationData.runtimeType}');
+      continue;
+    }
+
+    if (encryptedArray.isEmpty) {
+      print('[LocationFetch] Location array is empty for EID: $eid');
+      continue;
+    }
+
     final privateKeyB64 = await storage.read(key: eid);
     if (privateKeyB64 == null) {
       print('[LocationFetch] No private key found for EID: $eid');
       continue;
     }
     final privateKey = CryptoService.deserializePrivateKey(privateKeyB64);
-    for (final encrypted in encryptedArray) {
-      try {
-        final decrypted = CryptoService.decryptWithPrivateKey(privateKey, encrypted);
-        final loc = jsonDecode(decrypted);
-        print('[LocationFetch] EID: $eid, Lat: ${loc['lat']}, Lng: ${loc['lng']}, Time: ${DateTime.fromMillisecondsSinceEpoch(loc['ts'])}');
-        // Here you can add code to update the map UI with (loc['lat'], loc['lng'])
-      } catch (e) {
-        print('[LocationFetch] Failed to decrypt location for EID $eid: $e');
+    for (final encryptedEntry in encryptedArray) {
+      if (encryptedEntry is String) {
+        try {
+          final decrypted = CryptoService.decryptWithPrivateKey(privateKey, encryptedEntry);
+          final loc = jsonDecode(decrypted);
+          print('[LocationFetch] EID: $eid, Lat: ${loc['lat']}, Lng: ${loc['lng']}, Time: ${DateTime.fromMillisecondsSinceEpoch(loc['ts'])}');
+          // Here you can add code to update the map UI with (loc['lat'], loc['lng'])
+        } catch (e) {
+          print('[LocationFetch] Failed to decrypt location for EID $eid: $e. Encrypted data: $encryptedEntry');
+        }
+      } else {
+        print('[LocationFetch] Found non-string entry in location array for EID $eid: $encryptedEntry');
       }
     }
   }
