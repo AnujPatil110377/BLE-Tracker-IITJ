@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "942715338146",
+    "project_id": "authentication-b408d",
+    "storage_bucket": "authentication-b408d.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:942715338146:android:7460ee39eb03b66e8f46fb",
+        "android_client_info": {
+          "package_name": "com.example.ble_beacon_tracker"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "942715338146-hmurrh20htfr6vqdcg5a4jaqt77i3to6.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.ble_beacon_tracker",
+            "certificate_hash": "0e1719541aebc7ae6524075235aa9af1ff5ea45d"
+          }
+        },
+        {
+          "client_id": "942715338146-t4jkok3gda9bgiod6kv520qj0unk2mu4.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBSdBCpZ9-WyKI8y9qxjPOsl3WFTP3TO7Y"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "942715338146-s0mgp4pl31o6lf1s6ajntiis2ib2oj1f.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

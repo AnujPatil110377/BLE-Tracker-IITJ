@@ -11,6 +11,7 @@ import 'package:geolocator/geolocator.dart'; // Added for location fetching
 import 'package:ble_beacon_tracker/screens/tracker_home_screen.dart'; // Import the new home screen
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart'; // Added for Firestore access
+import 'firebase_options.dart'; // Add this import
 import 'services/crypto_service.dart'; // Importing CryptoService
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -54,7 +55,9 @@ Map<String, dynamic>? parseFMDNData(ScanResult scanResult) {
 @pragma('vm:entry-point') // Mandatory for Android
 void onStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
-  await Firebase.initializeApp(); // Ensure Firebase is initialized in background
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  ); // Ensure Firebase is initialized in background
 
   // Add a small delay to allow the isolate to fully initialize
   // before heavy plugin interaction. This is a common workaround for
@@ -380,7 +383,9 @@ Future<void> initializeService() async {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp();
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
   
   // Request permissions
   if (Platform.isAndroid) {
@@ -405,39 +410,20 @@ class BLEScannerApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder(
-      future: Firebase.initializeApp(),
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.done) {
-          return MaterialApp(
-            title: 'BLE FMDN Scanner',
-            theme: ThemeData.dark().copyWith(
-              colorScheme: ColorScheme.dark(
-                primary: Colors.teal,
-                secondary: Colors.orange,
-              ),
-              scaffoldBackgroundColor: Colors.black,
-              appBarTheme: const AppBarTheme(
-                backgroundColor: Colors.black,
-                foregroundColor: Colors.white,
-              ),
-            ),
-            home: const TrackerHomeScreen(),
-          );
-        }
-        if (snapshot.hasError) {
-          return MaterialApp(
-            home: Scaffold(
-              body: Center(child: Text('Firebase init error: ${snapshot.error}')),
-            ),
-          );
-        }
-        return MaterialApp(
-          home: Scaffold(
-            body: Center(child: CircularProgressIndicator()),
-          ),
-        );
-      },
+    return MaterialApp(
+      title: 'BLE FMDN Scanner',
+      theme: ThemeData.dark().copyWith(
+        colorScheme: ColorScheme.dark(
+          primary: Colors.teal,
+          secondary: Colors.orange,
+        ),
+        scaffoldBackgroundColor: Colors.black,
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Colors.black,
+          foregroundColor: Colors.white,
+        ),
+      ),
+      home: const TrackerHomeScreen(),
     );
   }
 }

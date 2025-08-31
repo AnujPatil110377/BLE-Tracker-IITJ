@@ -13,6 +13,8 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../../services/crypto_service.dart';
+import '../services/esp_ble_service.dart';
+import '../widgets/buzzer_button.dart';
 
 // Model for tracker data - can be expanded
 class TrackerDevice {
@@ -62,6 +64,7 @@ class TrackerHomeScreen extends StatefulWidget {
 }
 
 class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
+  late final StreamSubscription<User?> _authSubscription;
   final Map<String, TrackerDevice> _trackers = {};
   bool _isBackgroundServiceRunning = false;
   GoogleMapController? _googleMapController;
@@ -109,6 +112,14 @@ class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
     _refreshTimer = Timer.periodic(const Duration(minutes: 1), (timer) {
       fetchLocations();
     });
+    
+    // Initialize ESP BLE service for buzzer functionality
+    ESPBLEService.initializePeerDevice();
+
+    // Listen for auth state changes to refresh tracker list on login/logout/account switch
+    _authSubscription = FirebaseAuth.instance.authStateChanges().listen((user) {
+      fetchLocations();
+    });
   }
 
   @override
@@ -119,6 +130,11 @@ class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
     _foundDeviceSubscription?.cancel();
     _pingResponseSubscription?.cancel();
     _refreshTimer?.cancel();
+    
+    // Dispose ESP BLE service
+    ESPBLEService.dispose();
+  _authSubscription.cancel();
+    
     super.dispose();
   }
 
@@ -132,10 +148,9 @@ class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
   }
 
   void _initializeListeners() {
-    _foundDeviceSubscription = FlutterBackgroundService().on('foundDevice').listen((event) {
+    _foundDeviceSubscription = FlutterBackgroundService().on('foundDevice').listen((event) async {
       if (mounted && event != null) {
         final deviceId = event['device'] as String;
-        final name = event['name'] as String? ?? 'Unknown Device';
         final fmdnData = event['fmdn'] as Map?;
         final eid = fmdnData?['eid'] as String? ?? 'N/A';
         final locationData = event['location'] as Map?;
@@ -151,14 +166,25 @@ class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
             newTimestamp = DateTime.fromMillisecondsSinceEpoch(locationData['timestamp'] as int);
           }
         }
-        
+
+        // Always use Firestore name if available
+        String name = 'Unknown Device';
+        try {
+          final trackerDoc = await FirebaseFirestore.instance.collection('trackers').doc(eid).get();
+          if (trackerDoc.exists && trackerDoc.data() != null && trackerDoc.data()!.containsKey('name')) {
+            name = trackerDoc['name'] as String;
+          }
+        } catch (e) {
+          debugPrint('Error fetching tracker name from Firestore: $e');
+        }
+
         debugPrint('TRACKER HOME UI: Received device $name ($deviceId) at $newLocation');
 
         setState(() {
           _trackers.update(
             deviceId,
             (existing) {
-              existing.name = name; // Update name in case it changes
+              existing.name = name; // Always use Firestore name
               existing.lastLocation = newLocation ?? existing.lastLocation;
               existing.lastTimestamp = newTimestamp;
               existing.lastPing = _formatTimestamp(newTimestamp);
@@ -385,7 +411,7 @@ class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
           const Divider(color: Colors.white24, height: 1),
           ListTile(
             leading: const Icon(Icons.settings, color: Colors.white70),
-            title: const Text("Settings"),
+            title: const Text("Settings", style: TextStyle(color: Colors.white)),
             onTap: () {
               Navigator.pop(ctx);
             },
@@ -393,6 +419,159 @@ class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
         ],
       ),
     );
+  }
+
+  void _showBuzzerManagement() {
+    showDialog(
+      context: context,
+      builder: (context) => BuzzerManagementDialog(
+        onRefresh: () {
+          // Refresh the tracker list when needed
+          fetchLocations();
+        },
+      ),
+    );
+  }
+
+  void _showTrackerOptions(BuildContext context, Map<String, dynamic> tracker) {
+    // Fetch the latest buzzerFlag from Firestore before showing the dialog
+    FirebaseFirestore.instance
+        .collection('trackers')
+        .doc(tracker['eid'])
+        .get()
+        .then((doc) {
+      bool buzzerFlag = doc.data()?['buzzerFlag'] == true;
+      showModalBottomSheet(
+        context: context,
+        backgroundColor: _surfaceColor,
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        builder: (ctx) {
+          return StatefulBuilder(
+            builder: (context, setState) => Container(
+              padding: EdgeInsets.all(16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Tracker info header
+                  Container(
+                    width: double.infinity,
+                    padding: EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: _accentGreen.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'EID: ${tracker['eid']}',
+                          style: TextStyle(
+                            color: _primaryText,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        SizedBox(height: 4),
+                        Text(
+                          'Last seen: ${_formatTimestamp(DateTime.fromMillisecondsSinceEpoch(tracker['ts']))}',
+                          style: TextStyle(color: _secondaryText),
+                        ),
+                      ],
+                    ),
+                  ),
+                  SizedBox(height: 20),
+                  // Action buttons
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: () async {
+                            final newFlag = !buzzerFlag;
+                            try {
+                              await FirebaseFirestore.instance
+                                  .collection('trackers')
+                                  .doc(tracker['eid'])
+                                  .update({'buzzerFlag': newFlag});
+                              setState(() {
+                                buzzerFlag = newFlag;
+                              });
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    newFlag
+                                      ? 'Buzzer flag enabled for EID: ${tracker['eid']}'
+                                      : 'Buzzer flag disabled for EID: ${tracker['eid']}'
+                                  ),
+                                  backgroundColor: newFlag ? Colors.orange : Colors.green,
+                                ),
+                              );
+                            } catch (e) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('Failed to update buzzer: $e'),
+                                  backgroundColor: Colors.red,
+                                ),
+                              );
+                            }
+                          },
+                          icon: Icon(Icons.notifications_active, color: Colors.white),
+                          label: Text(
+                            buzzerFlag ? 'DISABLE BUZZER' : 'BUZZER',
+                            style: TextStyle(color: Colors.white),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.orange,
+                            padding: EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                      ),
+                      SizedBox(width: 12),
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: () {
+                            Navigator.pop(ctx);
+                            if (tracker['lat'] != null && tracker['lng'] != null && _googleMapController != null) {
+                              // Place a pin at the last fetched location and center the map
+                              final marker = Marker(
+                                markerId: MarkerId(tracker['eid']),
+                                position: LatLng(tracker['lat'], tracker['lng']),
+                                infoWindow: InfoWindow(title: tracker['eid']),
+                                icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
+                              );
+                              setState(() {
+                                _markers = Set<Marker>.from(_markers)..add(marker);
+                              });
+                              _googleMapController!.animateCamera(
+                                CameraUpdate.newLatLngZoom(LatLng(tracker['lat'], tracker['lng']), 16.0),
+                              );
+                            }
+                          },
+                          icon: Icon(Icons.location_on, color: Colors.white),
+                          label: Text('LOCATE', style: TextStyle(color: Colors.white)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: _accentGreen,
+                            padding: EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  SizedBox(height: 16),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+    });
   }
 
   Future<void> fetchLocations() async {
@@ -538,12 +717,28 @@ class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
                                 'Last seen: ${_formatTimestamp(DateTime.fromMillisecondsSinceEpoch(loc['ts']))}',
                                 style: const TextStyle(color: _secondaryText),
                               ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  // Buzzer button right next to tracker name
+                                  BuzzerButton(
+                                    eid: loc['eid'],
+                                    trackerName: 'EID: ${loc['eid']}',
+                                    onBuzzerSent: () {
+                                      debugPrint('Buzzer activated for tracker ${loc['eid']}');
+                                    },
+                                  ),
+                                  SizedBox(width: 8),
+                                  Icon(
+                                    Icons.arrow_forward_ios,
+                                    size: 16,
+                                    color: _secondaryText,
+                                  ),
+                                ],
+                              ),
                               onTap: () {
-                                if (loc['lat'] != null && loc['lng'] != null && _googleMapController != null) {
-                                  _googleMapController!.animateCamera(
-                                    CameraUpdate.newLatLngZoom(LatLng(loc['lat'], loc['lng']), 16.0),
-                                  );
-                                }
+                                // Show tracker options dropdown
+                                _showTrackerOptions(context, loc);
                               },
                             ),
                           );
@@ -578,6 +773,127 @@ class _TrackerHomeScreenState extends State<TrackerHomeScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class BuzzerManagementDialog extends StatelessWidget {
+  final VoidCallback? onRefresh;
+
+  const BuzzerManagementDialog({
+    Key? key,
+    this.onRefresh,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    final user = FirebaseAuth.instance.currentUser;
+    
+    return AlertDialog(
+      title: Text('Buzzer Management'),
+      content: Container(
+        width: double.maxFinite,
+        height: 300,
+        child: Column(
+          children: [
+            // Statistics section
+            FutureBuilder<Map<String, int>>(
+              future: ESPBLEService.getBuzzerStatistics(),
+              builder: (context, snapshot) {
+                if (snapshot.hasData) {
+                  final stats = snapshot.data!;
+                  return Card(
+                    child: Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceAround,
+                        children: [
+                          _buildStatItem('Active', stats['active']!, Colors.orange),
+                          _buildStatItem('Total', stats['total']!, Colors.blue),
+                        ],
+                      ),
+                    ),
+                  );
+                }
+                return Card(
+                  child: Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Text('Loading statistics...'),
+                  ),
+                );
+              },
+            ),
+            
+            SizedBox(height: 16),
+            
+            Expanded(
+              child: Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.notifications_active,
+                      size: 48,
+                      color: Colors.orange,
+                    ),
+                    SizedBox(height: 16),
+                    Text(
+                      'Buzzer System Active',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    SizedBox(height: 8),
+                    Text(
+                      'Your device is monitoring for buzzer flags.\nUse the buzzer buttons next to each tracker\nto send buzzer commands.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.grey[600]),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        if (user != null)
+          TextButton(
+            onPressed: () async {
+              await ESPBLEService.cancelAllBuzzerFlags(user.uid);
+              Navigator.of(context).pop();
+              onRefresh?.call();
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('All buzzer flags cancelled'),
+                  backgroundColor: Colors.green,
+                ),
+              );
+            },
+            child: Text('Cancel All Buzzers'),
+          ),
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text('Close'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStatItem(String label, int value, Color color) {
+    return Column(
+      children: [
+        Text(
+          value.toString(),
+          style: TextStyle(
+            fontSize: 24,
+            fontWeight: FontWeight.bold,
+            color: color,
+          ),
+        ),
+        Text(label),
+      ],
     );
   }
 }
